@@ -5,12 +5,19 @@
 #include <iostream>
 #include <vector>
 #include <stdexcept>
+#include <fstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+#include <nlohmann/json.hpp>
+#include <chrono>
 
+using json = nlohmann::json;
 using u16  = std::uint16_t;
 using u64  = std::uint64_t;
 using u128 = __uint128_t;
 
-constexpr u64 DMAX = 400'000ULL;
+constexpr u64 DMAX = 1'000'000ULL;
 
 // constexpr std::array<u64, 36> MODS = {
 //     28561, 83521, 12167, 24389, 29791, 50653,
@@ -21,9 +28,9 @@ constexpr u64 DMAX = 400'000ULL;
 //     72361, 73441, 76729, 85849, 96721, 97969
 // };
 
-constexpr std::array<u64, 42> MODS = {
-    625,  2197,  2401,  2197,  4913,   529,
-    841,   961,  1369,  1681,  2209,  2809,
+constexpr std::array<u64, 41> MODS = {
+  15625, 16807, 28561, 83521, 12167,
+  24389, 29791, 50653, 68921,103823,  2809,
    3721,  5041,  6241,  9409, 10201, 10609,
   11881, 16129, 18769, 22201, 22801, 24649,
   27889, 29929, 32761, 36481, 37249, 38809,
@@ -50,91 +57,120 @@ constexpr u64 pow4_mod(u64 x, u64 m) noexcept {
 // 32a^4 + b^4 の取り得る剰余テーブル
 // ============================================================
 
-void save_left_residue_tables(
-    const std::vector<std::vector<bool>>& tables,
-    const std::string& filename
-) {
-    std::ofstream out(filename, std::ios::binary);
+void save_left_residue_tables(const std::vector<std::vector<bool>>& tables, const std::string& filename) {
+    if (tables.size() != MODS.size()) {
+        throw std::runtime_error("table count does not match MODS");
+    }
+
+    json root;
+    root["version"] = 1;
+    root["type"] = "left_residue_tables";
+
+    root["moduli"] = json::array();
+
+    for (u64 mod : MODS) {
+        root["moduli"].push_back(mod);
+    }
+
+    root["tables"] = json::array();
+
+    for (std::size_t i = 0; i < MODS.size(); ++i) {
+        const u64 mod = MODS[i];
+        const auto& table = tables[i];
+
+        if (table.size() != mod) {
+            throw std::runtime_error("table size does not match modulus");
+        }
+
+        json residues = json::array();
+
+        for (u64 r = 0; r < mod; ++r) {
+            if (table[r]) residues.push_back(r);
+        }
+
+        root["tables"].push_back({
+            {"modulus", mod},
+            {"residues", std::move(residues)}
+        });
+    }
+
+    std::ofstream out(filename);
 
     if (!out) {
         throw std::runtime_error("failed to open " + filename);
     }
 
-    const std::uint64_t count = tables.size();
-    out.write(
-        reinterpret_cast<const char*>(&count),
-        sizeof(count)
-    );
-
-    for (const auto& table : tables) {
-        const std::uint64_t size = table.size();
-
-        out.write(
-            reinterpret_cast<const char*>(&size),
-            sizeof(size)
-        );
-
-        const std::size_t byte_count = (size + 7) / 8;
-
-        std::vector<std::uint8_t> bytes(byte_count, 0);
-
-        for (std::size_t i = 0; i < size; ++i) {
-            if (table[i]) {
-                bytes[i >> 3] |= static_cast<std::uint8_t>(1u << (i & 7));
-            }
-        }
-
-        out.write(
-            reinterpret_cast<const char*>(bytes.data()),
-            bytes.size()
-        );
-    }
+    out << root.dump(2) << '\n';
 }
 
-std::vector<std::vector<bool>> load_left_residue_tables(
-    const std::string& filename
-) {
-    std::ifstream in(filename, std::ios::binary);
+std::vector<std::vector<bool>> load_left_residue_tables(const std::string& filename) {
+    std::ifstream in(filename);
 
     if (!in) {
         throw std::runtime_error("failed to open " + filename);
     }
 
-    std::uint64_t count;
+    const json root = json::parse(in);
 
-    in.read(
-        reinterpret_cast<char*>(&count),
-        sizeof(count)
-    );
-
-    std::vector<std::vector<bool>> tables;
-    tables.reserve(count);
-
-    for (std::uint64_t j = 0; j < count; ++j) {
-        std::uint64_t size;
-
-        in.read(
-            reinterpret_cast<char*>(&size),
-            sizeof(size)
-        );
-
-        std::vector<bool> table(size, false);
-
-        const std::size_t byte_count = (size + 7) / 8;
-        std::vector<std::uint8_t> bytes(byte_count);
-
-        in.read(
-            reinterpret_cast<char*>(bytes.data()),
-            bytes.size()
-        );
-
-        for (std::size_t i = 0; i < size; ++i) {
-            table[i] = (bytes[i >> 3] >> (i & 7)) & 1;
-        }
-
-        tables.push_back(std::move(table));
+    if (!root.contains("version") || root["version"] != 1) {
+        throw std::runtime_error("invalid residue table version");
     }
 
+    if (!root.contains("type") || root["type"] != "left_residue_tables") {
+        throw std::runtime_error("invalid residue table type");
+    }
+
+    if (!root.contains("moduli") || !root["moduli"].is_array()) {
+        throw std::runtime_error("missing moduli");
+    }
+
+    if (root["moduli"].size() != MODS.size()) {
+        throw std::runtime_error("MODS count mismatch");
+    }
+
+    for (std::size_t i = 0; i < MODS.size(); ++i) {
+        const u64 file_mod = root["moduli"][i].get<u64>();
+
+        if (file_mod != MODS[i]) {
+            throw std::runtime_error("MODS mismatch at index " + std::to_string(i));
+        }
+    }
+
+    if (!root.contains("tables") || !root["tables"].is_array()) {
+        throw std::runtime_error("missing tables");
+    }
+
+    if (root["tables"].size() != MODS.size()) {
+        throw std::runtime_error("table count mismatch");
+    }
+
+    std::vector<std::vector<bool>> tables;
+    tables.reserve(MODS.size());
+
+    for (std::size_t i = 0; i < MODS.size(); ++i) {
+        const u64 mod = MODS[i];
+        const auto& entry = root["tables"][i];
+
+        if (!entry.contains("modulus") || entry["modulus"].get<u64>() != mod) {
+            throw std::runtime_error("table modulus mismatch at index " + std::to_string(i));
+        }
+
+        if (!entry.contains("residues") || !entry["residues"].is_array()) {
+            throw std::runtime_error("missing residues at index " + std::to_string(i));
+        }
+
+        std::vector<bool> table(mod, false);
+
+        for (const auto& value : entry["residues"]) {
+            const u64 r = value.get<u64>();
+
+            if (r >= mod) {
+                throw std::runtime_error("residue out of range at index " + std::to_string(i));
+            }
+            table[r] = true;
+        }
+        tables.push_back(std::move(table));
+    }
     return tables;
 }
 
@@ -174,9 +210,36 @@ std::vector<std::vector<bool>> make_left_residue_tables() {
     return tables;
 }
 
+std::vector<std::vector<bool>> get_left_residue_tables() {
+    constexpr const char* filename = "left_residue_tables.json";
+
+    {
+        std::ifstream in(filename);
+
+        if (in) {
+            std::cout << "loading residue tables..." << std::endl;
+
+            try {
+                return load_left_residue_tables(filename);
+            } catch (const std::exception& e) {
+                std::cout << "invalid residue table: " << e.what() << std::endl;
+                std::cout << "rebuilding residue tables..." << std::endl;
+            }
+        }
+    }
+
+    auto tables = make_left_residue_tables();
+
+    std::cout << "saving residue tables..." << std::endl;
+
+    save_left_residue_tables(tables, filename);
+
+    return tables;
+}
+
 std::vector<bool> make_left_residue_table_65536() {
 
-    const u64 m = 32768;
+    const u64 m = 65536;
 
     std::vector<bool> fourth(m, false);
 
@@ -200,29 +263,6 @@ std::vector<bool> make_left_residue_table_65536() {
 
 
     return left;
-}
-
-std::vector<std::vector<bool>> get_left_residue_tables() {
-    constexpr const char* filename = "left_residue_tables.bin";
-
-    {
-        std::ifstream in(filename, std::ios::binary);
-
-        if (in) {
-            std::cout << "loading residue tables...\n";
-            return load_left_residue_tables(filename);
-        }
-    }
-
-    std::cout << "building residue tables...\n";
-
-    auto tables = make_left_residue_tables();
-
-    std::cout << "saving residue tables...\n";
-
-    save_left_residue_tables(tables, filename);
-
-    return tables;
 }
 
 // ============================================================
@@ -280,6 +320,8 @@ std::vector<std::vector<bool>> get_left_residue_tables() {
 
 int main()
 {
+    auto start = std::chrono::steady_clock::now();
+
     std::cout << "building residue tables..." << std::endl;
 
     const auto left_table_65536 = make_left_residue_table_65536();
@@ -349,8 +391,12 @@ int main()
     }
 
     std::cout << "file size:       "
-              << survived_count * sizeof(u128)
+              << static_cast<double>(survived_count * sizeof(u128))/(1024 * 1024) << "MB"
               << std::endl;
+
+    auto end = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    std::cout << "time: " << ms / 1000.0 << "seconds" << std::endl;
 
     return 0;
 }
